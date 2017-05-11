@@ -31,7 +31,7 @@ struct hcsr04{
 	int				irq;
 	char				distance;
 }hc;
-//test
+//test for git user name
 void show_result()
 {
 	pr_info("enter %s", __func__);
