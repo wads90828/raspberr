@@ -1,0 +1,216 @@
+#include <linux/input.h>
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/platform_device.h>
+#include <asm/irq.h>
+#include <asm/io.h>
+#include <linux/interrupt.h>
+#include <linux/of_gpio.h>
+#include <linux/delay.h>
+#include <linux/time.h>
+#include <linux/fs.h>
+#include <linux/cdev.h>
+#include <asm/uaccess.h>
+#include <linux/mutex.h>
+void show_result(void);
+struct timeval time2;
+struct timeval time1;
+static struct cdev devone_cdev;
+int time,counter=0;
+struct hcsr04{
+		
+	struct device			*dev;
+	int				gpio;
+	int				irq;
+	char				distance;
+}hc;
+static struct input_dev *hcsr_dev;
+dev_t hcsrdev;
+static int devnum = 1;
+
+void show_result()
+{	
+	pr_info("enter %s", __func__);
+	pr_info("time1 = %d \n",time1.tv_usec);
+	pr_info("time2 = %d \n",time2.tv_usec);	
+	time = time2.tv_usec-time1.tv_usec;	
+	hc.distance = time/58;
+	pr_info("distance = %d cm\n",hc.distance);
+	input_report_abs(hcsr_dev, ABS_X, hc.distance);
+	input_sync(hcsr_dev);
+}
+
+irqreturn_t hcsr_interrupt(int irq, void *dev_id)
+{
+	pr_info("enter %s", __func__);
+	counter++;
+ 		switch(counter)
+		{
+			case 1:
+				pr_info("case 1");
+				do_gettimeofday(&time1);
+				break;
+			case 2:
+				pr_info("case 2");
+				do_gettimeofday(&time2);
+				//input_sync(hcsr_dev);
+				counter=0;
+				show_result();
+				break;
+		}	
+	
+	return IRQ_HANDLED;
+}
+static const struct of_device_id hcsr04_dt[] = {
+	{ .compatible = "hcsr04" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of,hcsr04_dt);
+
+void hc_sr04_trigger(struct hcsr04 hc )
+{ 	
+	pr_info("enter %s", __func__);
+	gpio_direction_output(hc.gpio, 1);	
+	udelay(10);
+	gpio_direction_output(hc.gpio, 0);
+}
+static ssize_t input_hcsr_read(struct file *filp,const char *buf,size_t count,loff_t *ppos)
+{
+
+	pr_info("enter %s",__func__);
+	pr_info("%c\n",hc.distance);
+	counter=0;
+	hc_sr04_trigger(hc);
+	mdelay(1000);
+	copy_to_user(buf,&hc.distance,count);
+	return count;
+}
+static int input_hcsr_open(struct inode *inode,struct file *filp)
+{
+	pr_info("enter %s",__func__);
+	return 0;
+}
+struct file_operations input_hcsr_fops =
+{	
+	read:			input_hcsr_read,
+	open:			input_hcsr_open,
+	
+};
+static int input_hcsr04_probe(struct platform_device *pdev)
+{
+	struct device_node *node= pdev->dev.of_node;
+ 	int ret;
+	int error;
+	struct class_device *class_dev = NULL;
+	static struct class *devone_class=NULL;	
+	if(!node)
+		{
+			pr_info("the node is NULL");
+			return -ENODEV;
+		}
+	
+	/* get trig gpio */ 	
+	ret=of_get_named_gpio_flags(node,"hc-trig",0,NULL); 
+	if(!gpio_is_valid(ret))
+		{
+		if(ret!=-EPROBE_DEFER)
+			pr_err("Error to get hc triggpio\n");
+			return ret;
+		}
+	hc.gpio=ret;
+
+        ret = gpio_request(hc.gpio, "triggpio");
+        if (ret) {
+         	  pr_err("gpio_request can not request trig gpio\n");
+       		 }
+	
+	ret=of_get_named_gpio_flags(node,"hc-irq",0,NULL); 
+	if(!gpio_is_valid(ret))
+		{
+		if(ret!=-EPROBE_DEFER)
+			pr_err("Error to get hc echogpio\n");
+			return ret;
+		}	
+	hc.irq=ret;
+	ret = gpio_request(hc.irq, "echogpio");
+        if (ret) {
+         	  pr_err("gpio_request can not request echo gpio\n");
+       		 }
+	
+	if (request_irq(gpio_to_irq(hc.irq), hcsr_interrupt,IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING, "input-hcsr04", NULL)) {
+                printk(KERN_ERR "button.c: Can't allocate irq %d\n", gpio_to_irq(hc.irq));
+                return -EBUSY;
+        }
+	//input event register//
+	hcsr_dev = input_allocate_device();
+	if (!hcsr_dev) {
+		printk(KERN_ERR "input-hcsr04.c: Not enough memory\n");
+		error = -ENOMEM;
+		goto err_free_irq;
+	}
+	
+	hcsr_dev->name = "input_hcsr04";
+	
+	set_bit(EV_ABS, hcsr_dev->evbit);
+	set_bit(ABS_X, hcsr_dev->absbit);
+
+	error = input_register_device(hcsr_dev);
+	if (error) {
+		printk(KERN_ERR "input-hcsr04.c: Failed to register device\n");
+		goto err_free_dev;
+	}
+	//input event register//
+
+	///////test file operation///////
+		ret = alloc_chrdev_region(&hcsrdev,0,devnum,"inputhcsr04");	
+	if(ret)		
+	{
+		pr_info("can't get major");
+	}
+	else
+	{		
+		pr_info("get major success major number: %i",MAJOR(hcsrdev));
+	}		
+	devone_class = class_create(THIS_MODULE,"hcsrdev");
+
+	if(IS_ERR(devone_class))
+	{
+		pr_info("devone_class error");
+	}	
+	class_dev = device_create(devone_class,NULL,&hcsrdev,NULL,"inputhcsr04");
+	if(class_dev==NULL)
+	{
+		pr_info("device_create failed");
+	}		
+	cdev_init(&devone_cdev,&input_hcsr_fops);
+	ret=cdev_add(&devone_cdev,&hcsrdev,1);
+	if(ret==-1)
+	{
+		pr_info("cdev_add error ");
+		return ret;
+	}
+	///////test file operation///////
+	return 0;
+
+ err_free_dev:
+	input_free_device(hcsr_dev);
+ err_free_irq:
+	free_irq(gpio_to_irq(hc.irq), hcsr_interrupt);
+	return error;
+}
+
+static void __exit hcsr_exit(void)
+{
+        input_unregister_device(hcsr_dev);
+	free_irq(gpio_to_irq(hc.irq), hcsr_interrupt);
+}
+
+static struct platform_driver input_hcsr04_driver = {
+	.driver = {
+		.name	= "input-hcsr04",
+		.of_match_table = hcsr04_dt,
+	},
+	.probe  = input_hcsr04_probe,
+	.remove = hcsr_exit,
+};
+module_platform_driver(input_hcsr04_driver);
